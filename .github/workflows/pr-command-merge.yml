@@ -47,9 +47,21 @@ jobs:
     outputs:
       fix: ${{ steps.scan.outputs.fix }}
     steps:
+      - name: Require PR_COMMAND_TOKEN
+        env:
+          HAS_TOKEN: ${{ secrets.PR_COMMAND_TOKEN != '' }}
+        run: |
+          # Pushes and merges made with GITHUB_TOKEN don't trigger other workflows: CI would never run on
+          # the agent's fix commits, and without required checks the PR would then look clean and be
+          # merged untested. So no token, no merging.
+          if [ "$HAS_TOKEN" != true ]; then
+            echo "::error::Secret PR_COMMAND_TOKEN is missing. See the PR Command README."
+            exit 1
+          fi
+
       - id: scan
         env:
-          GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN }}
           PR: ${{ inputs.pr }}
           METHOD: ${{ inputs.merge_method }}
           MAX_ATTEMPTS: ${{ inputs.max_attempts }}
@@ -185,7 +197,7 @@ jobs:
       group: pr-command-fix-${{ github.repository }}-${{ matrix.pr }}
       cancel-in-progress: false
     env:
-      GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+      GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN }}
       N: ${{ matrix.pr }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -211,7 +223,7 @@ jobs:
         with:
           ref: ${{ steps.pr.outputs.head }}
           fetch-depth: 0
-          token: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+          token: ${{ secrets.PR_COMMAND_TOKEN }}
 
       - name: Configure git
         run: |
@@ -224,7 +236,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+          github_token: ${{ secrets.PR_COMMAND_TOKEN }}
           claude_args: --max-turns 150 --allowedTools Bash,Read,Edit,MultiEdit,Write,Glob,Grep,TodoWrite
           prompt: |
             You are the merge agent for pull request #${{ matrix.pr }} in ${{ github.repository }}.
