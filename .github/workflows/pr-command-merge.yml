@@ -47,9 +47,23 @@ jobs:
     outputs:
       fix: ${{ steps.scan.outputs.fix }}
     steps:
+      - name: Require PR_COMMAND_TOKEN
+        env:
+          HAS_TOKEN: ${{ secrets.PR_COMMAND_TOKEN != '' }}
+        run: |
+          # Pushes and merges made with GITHUB_TOKEN don't trigger other workflows: CI would never run on
+          # the agent's fix commits, and without required checks the PR would then look clean and be
+          # merged untested. So no token, no merging.
+          if [ "$HAS_TOKEN" != true ]; then
+            echo "::error::Secret PR_COMMAND_TOKEN is missing. See the PR Command README."
+            exit 1
+          fi
+
       - id: scan
         env:
-          GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN }}
+          # Fine-grained PATs cannot read check runs; the workflow token can (checks: read).
+          CHECKS_TOKEN: ${{ github.token }}
           PR: ${{ inputs.pr }}
           METHOD: ${{ inputs.merge_method }}
           MAX_ATTEMPTS: ${{ inputs.max_attempts }}
@@ -88,7 +102,7 @@ jobs:
 
           fix=()
           for n in $prs; do
-            d=$(gh pr view "$n" --repo "$R" --json author,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,autoMergeRequest)
+            d=$(GH_TOKEN="$CHECKS_TOKEN" gh pr view "$n" --repo "$R" --json author,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,autoMergeRequest)
             [ "$(jq -r .state <<<"$d")" = OPEN ] || continue
             author=$(jq -r .author.login <<<"$d")
             if [[ ",${ALLOWED_USERS// /}," != *",$author,"* ]]; then
@@ -185,7 +199,9 @@ jobs:
       group: pr-command-fix-${{ github.repository }}-${{ matrix.pr }}
       cancel-in-progress: false
     env:
-      GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+      GH_TOKEN: ${{ secrets.PR_COMMAND_TOKEN }}
+      # Fine-grained PATs cannot read check runs; the workflow token can (checks: read).
+      CHECKS_TOKEN: ${{ github.token }}
       N: ${{ matrix.pr }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -195,7 +211,7 @@ jobs:
           set -euo pipefail
           R="$GITHUB_REPOSITORY"
           gh pr edit "$N" --repo "$R" --add-label "$AGENT"
-          d=$(gh pr view "$N" --repo "$R" --json title,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup)
+          d=$(GH_TOKEN="$CHECKS_TOKEN" gh pr view "$N" --repo "$R" --json title,headRefName,baseRefName,mergeable,mergeStateStatus,statusCheckRollup)
           echo "head=$(jq -r .headRefName <<<"$d")" >> "$GITHUB_OUTPUT"
           echo "base=$(jq -r .baseRefName <<<"$d")" >> "$GITHUB_OUTPUT"
           {
@@ -211,7 +227,7 @@ jobs:
         with:
           ref: ${{ steps.pr.outputs.head }}
           fetch-depth: 0
-          token: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+          token: ${{ secrets.PR_COMMAND_TOKEN }}
 
       - name: Configure git
         run: |
@@ -224,7 +240,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.PR_COMMAND_TOKEN || github.token }}
+          github_token: ${{ secrets.PR_COMMAND_TOKEN }}
           claude_args: --max-turns 150 --allowedTools Bash,Read,Edit,MultiEdit,Write,Glob,Grep,TodoWrite
           prompt: |
             You are the merge agent for pull request #${{ matrix.pr }} in ${{ github.repository }}.
@@ -241,7 +257,7 @@ jobs:
                resolved: do NOT run the full CI, test suite or build locally first (even if the repository's
                instructions say so). CI runs on GitHub after the push anyway; at most run a quick check on
                the files you touched.
-            2. Failing checks: inspect them (`gh pr checks ${{ matrix.pr }}`, `gh run list --branch <head>`,
+            2. Failing checks: inspect them (`GH_TOKEN=$CHECKS_TOKEN gh pr checks ${{ matrix.pr }}`, `gh run list --branch <head>`,
                `gh run view <id> --log-failed`) and fix the root cause. Locally, run only the specific failing
                test, lint or type check to verify your fix, never the whole CI; GitHub re-runs CI after the push.
             3. If a failure is clearly unrelated to this PR and flaky (infrastructure, timeouts, rate limits),
