@@ -5,6 +5,12 @@
 # each other) don't all get fixed at once. After MAX_ATTEMPTS, or when the agent gives up, the PR gets "needs-attention" and a WARNING block at the top
 # of its description.
 #
+# A PR that is only BEHIND the base branch is brought up to date ONE AT A TIME: the scan
+# updates the oldest behind PR, and only while no other ready-to-merge PR is still waiting
+# for its checks. Updating every behind PR after every merge re-ran each queued PR's full CI
+# once per merge ahead of it, and all but one of those runs were thrown away (univelop/aya,
+# Nov 2026: ~78 billed minutes per merged PR, half of them cancelled by the next update).
+#
 # Secrets (org level): CLAUDE_CODE_OAUTH_TOKEN (claude setup-token), PR_COMMAND_TOKEN
 # (fine-grained PAT or GitHub App token with contents/pull-requests/issues/actions write;
 # needed so pushes and merges trigger the repos' other workflows).
@@ -113,6 +119,7 @@ jobs:
           fi
 
           fix=()
+          behind=()
           for n in $prs; do
             d=$(GH_TOKEN="$CHECKS_TOKEN" gh pr view "$n" --repo "$R" --json author,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,autoMergeRequest)
             [ "$(jq -r .state <<<"$d")" = OPEN ] || continue
@@ -169,7 +176,9 @@ jobs:
             else
               case "$state" in
                 BEHIND)
-                  gh pr update-branch "$n" --repo "$R" || needs_agent=true ;;
+                  # Updated after the loop, one at a time.
+                  behind+=("$n")
+                  continue ;;
                 CLEAN|HAS_HOOKS|UNSTABLE)
                   gh pr merge "$n" --repo "$R" "--$METHOD" || ensure_auto "$d" "$n" ;;
                 BLOCKED)
@@ -208,6 +217,25 @@ jobs:
             fi
             fix+=("$n")
           done
+
+          # One update in flight at a time. Checked across every ready PR, not just the ones this scan
+          # looked at: a scan triggered by one PR's CI must not start a second update while another
+          # PR's updated head is still being tested.
+          if [ "${#behind[@]}" -gt 0 ]; then
+            inflight=$(GH_TOKEN="$CHECKS_TOKEN" gh pr list --repo "$R" --label "$READY" --state open --limit 100 \
+              --json number,isDraft,statusCheckRollup --jq '[.[] | select(.isDraft | not)
+                | select([.statusCheckRollup[]? | select((.workflowName // "") != env.SELF_WORKFLOW)
+                  | select((.__typename == "CheckRun" and .status != "COMPLETED")
+                           or ((.state // "") | IN("PENDING","EXPECTED")))] | length > 0)
+                | .number] | map(tostring) | join(", #")')
+            if [ -n "$inflight" ]; then
+              echo "behind: #${behind[*]}; not updating while checks run on #$inflight"
+            else
+              n=$(printf '%s\n' "${behind[@]}" | sort -n | head -n1)
+              echo "#$n: behind, updating it (the oldest of: ${behind[*]})"
+              gh pr update-branch "$n" --repo "$R" || fix+=("$n")
+            fi
+          fi
 
           echo "fix=$(printf '%s\n' "${fix[@]}" | jq -R 'select(length > 0) | tonumber' | jq -sc .)" >> "$GITHUB_OUTPUT"
 
